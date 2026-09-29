@@ -1,0 +1,19 @@
+# Google Cloud Project ID
+project_id = "my-gcp-project-id"
+
+# Google Cloud Region
+region = "us-central1"
+
+# Spanner instance name.
+# Defaults to "shared-demos" (assumes it already exists).
+# If left empty ("") or null, Terraform will create a new Spanner instance with 100 PU, standard edition, and no backups.
+instance_name = "shared-demos"
+
+# Set to true if you want Terraform to create the Spanner instance explicitly with the given instance_name
+create_instance = false
+
+# Database ID to create within the instance
+database_id = "fgac-demo"
+
+# Local directory where the 4 service account credential JSON files will be written
+credentials_dir = "../credentials"

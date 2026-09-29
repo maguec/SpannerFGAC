@@ -1,0 +1,7 @@
+terraform/*.tfvars
+terraform/.terraform.lock.hcl
+terraform/.terraform
+terraform/terraform.tfstat*
+*/__pycache__
+credentials/*.json
+data/*.csv
