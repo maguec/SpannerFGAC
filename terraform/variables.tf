@@ -33,10 +33,10 @@ variable "database_id" {
   default     = "fgac-demo"
 }
 
-variable "credentials_dir" {
-  description = "Local directory where generated service account JSON keys will be saved"
+variable "impersonator_member" {
+  description = "IAM member identity allowed to impersonate the FGAC service accounts (e.g., 'user:you@example.com' or 'group:team@example.com'). If empty, defaults to current authenticated gcloud user."
   type        = string
-  default     = "../credentials"
+  default     = ""
 }
 
 variable "deletion_protection" {

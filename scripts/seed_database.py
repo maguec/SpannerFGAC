@@ -42,12 +42,13 @@ def main():
     parser.add_argument("--database", default=def_db, help="Spanner Database Name")
     parser.add_argument(
         "--credentials",
-        default=os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "credentials",
-            "readwrite_credentials.json",
-        ),
-        help="Path to service account credentials JSON file (defaults to readwrite_credentials.json)",
+        default=None,
+        help="Optional path to service account credentials JSON file. If not set, uses Service Account Impersonation.",
+    )
+    parser.add_argument(
+        "--target-sa",
+        default=None,
+        help="Target Service Account email to impersonate (defaults to spanner-fgac-readwrite@<project>.iam.gserviceaccount.com)",
     )
     parser.add_argument(
         "--csv-file",
@@ -60,34 +61,34 @@ def main():
     )
     args = parser.parse_args()
 
-    if not os.path.exists(args.credentials):
-        print(f"Error: Credential file not found at: {args.credentials}")
-        print("Please run `terraform apply` first to generate the credentials.")
-        sys.exit(1)
-
     if not os.path.exists(args.csv_file):
         print(f"Error: CSV file not found at: {args.csv_file}")
         print("Please run `python3 scripts/generate_data.py` first.")
         sys.exit(1)
 
-    # Load credentials
-    credentials = service_account.Credentials.from_service_account_file(args.credentials)
-    project = args.project or credentials.project_id
+    # Disable Spanner built-in metrics exporter to prevent unnecessary Cloud Monitoring calls
+    os.environ["SPANNER_DISABLE_BUILTIN_METRICS"] = "true"
+
+    if args.credentials and os.path.exists(args.credentials):
+        print(f"Using local key file: {args.credentials}")
+        credentials = service_account.Credentials.from_service_account_file(args.credentials)
+        project = args.project or credentials.project_id
+        client = spanner.Client(project=project, credentials=credentials, disable_builtin_metrics=True)
+    else:
+        project = args.project or def_proj or "mague-tf"
+        target_sa = args.target_sa or f"spanner-fgac-readwrite@{project}.iam.gserviceaccount.com"
+        print(f"Using Service Account Impersonation: {target_sa}")
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from scripts.auth import get_impersonated_client
+        client = get_impersonated_client(target_sa_email=target_sa, project_id=project)
 
     print(f"Connecting to Spanner:")
     print(f"  Project:  {project}")
     print(f"  Instance: {args.instance}")
     print(f"  Database: {args.database}")
-    print(f"  Using:    {os.path.basename(args.credentials)} (role: readwrite)")
+    print(f"  Database Role: readwrite")
 
-    # Disable Spanner built-in metrics exporter to prevent unnecessary Cloud Monitoring calls
-    os.environ["SPANNER_DISABLE_BUILTIN_METRICS"] = "true"
-
-    client = spanner.Client(
-        project=project,
-        credentials=credentials,
-        disable_builtin_metrics=True,
-    )
     instance = client.instance(args.instance)
     database = instance.database(args.database, database_role="readwrite")
 

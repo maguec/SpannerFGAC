@@ -27,9 +27,7 @@ output "database_roles" {
   }
 }
 
-output "credential_files" {
-  description = "Local file paths for the generated service account credentials"
-  value = {
-    for k, f in local_file.credentials : k => f.filename
-  }
+output "impersonator_member" {
+  description = "The IAM member identity granted serviceAccountTokenCreator to impersonate the personas"
+  value       = local.impersonator_member
 }

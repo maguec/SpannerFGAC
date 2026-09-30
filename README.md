@@ -1,6 +1,6 @@
 # Cloud Spanner Fine-Grained Access Control (FGAC) Demo
 
-This repository demonstrates **Fine-Grained Access Control (FGAC)** in Google Cloud Spanner using Terraform, Python 3.11+ managed by `uv`, and an interactive `NiceGUI` dashboard.
+This repository demonstrates **Fine-Grained Access Control (FGAC)** in Google Cloud Spanner using Terraform, Service Account Impersonation (no static key downloads), Python 3.11+ managed by `uv`, and an interactive `NiceGUI` dashboard.
 
 ---
 
@@ -8,16 +8,14 @@ This repository demonstrates **Fine-Grained Access Control (FGAC)** in Google Cl
 
 ```mermaid
 graph TD
-    subgraph "Local Key Files"
-        K1["credentials/readwrite_credentials.json"]
-        K2["credentials/fullview_credentials.json"]
-        K3["credentials/masked_credentials.json"]
+    subgraph "Caller Identity (ADC)"
+        U["gcloud auth application-default login<br/>(roles/iam.serviceAccountTokenCreator)"]
     end
 
-    subgraph "Cloud IAM Personas"
-        SA1["sa-spanner-readwrite<br/>roles/spanner.databaseRoleUser (readwrite)"]
-        SA2["sa-spanner-fullview<br/>roles/spanner.databaseRoleUser (fullview)"]
-        SA3["sa-spanner-masked<br/>roles/spanner.databaseRoleUser (masked)"]
+    subgraph "Cloud IAM Personas (Impersonated)"
+        SA1["spanner-fgac-readwrite<br/>roles/spanner.databaseRoleUser (readwrite)"]
+        SA2["spanner-fgac-fullview<br/>roles/spanner.databaseRoleUser (fullview)"]
+        SA3["spanner-fgac-masked<br/>roles/spanner.databaseRoleUser (masked)"]
     end
 
     subgraph "Spanner Database Objects"
@@ -25,38 +23,45 @@ graph TD
         V["View: customers_masked<br/>(SQL SECURITY DEFINER)<br/>(ssn: XXX-XX-1234, phone: XXX-XXX-1234)"]
     end
 
-    K1 --> SA1 -->|SELECT, INSERT, UPDATE, DELETE| T
-    K1 --> SA1 -->|SELECT| V
+    U -->|google.auth.impersonated_credentials| SA1
+    U -->|google.auth.impersonated_credentials| SA2
+    U -->|google.auth.impersonated_credentials| SA3
 
-    K2 --> SA2 -->|SELECT Only| T
-    K2 --> SA2 -->|SELECT Only| V
+    SA1 -->|SELECT, INSERT, UPDATE, DELETE| T
+    SA1 -->|SELECT| V
 
-    K3 --> SA3 -.->|403 PERMISSION DENIED| T
-    K3 --> SA3 -->|SELECT Only| V
+    SA2 -->|SELECT Only| T
+    SA2 -->|SELECT Only| V
+
+    SA3 -.->|403 PERMISSION DENIED| T
+    SA3 -->|SELECT Only| V
 ```
 
 ---
 
 ## Persona Security Matrix
 
-| Persona | Local Credential File | Cloud IAM Role | Spanner DB Role | Table Access (`customers`) | View Access (`customers_masked`) | DML Operations |
+| Persona | Target Service Account | Cloud IAM Role | Spanner DB Role | Table Access (`customers`) | View Access (`customers_masked`) | DML Operations |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. ReadWrite** | `credentials/readwrite_credentials.json` | `roles/spanner.databaseRoleUser` | `readwrite` | **Allowed** (Unmasked) | **Allowed** (Masked) | **Allowed** (Insert, Update, Delete) |
-| **2. FullView** | `credentials/fullview_credentials.json` | `roles/spanner.databaseRoleUser` | `fullview` | **Allowed** (Unmasked) | **Allowed** (Masked) | ❌ **Denied** (Read-Only) |
-| **3. Masked** | `credentials/masked_credentials.json` | `roles/spanner.databaseRoleUser` | `masked` | ❌ **Denied** (403 Error) | **Allowed** (Masked SSN/Phone) | ❌ **Denied** (No DML) |
+| **1. ReadWrite** | `spanner-fgac-readwrite@...` | `roles/spanner.databaseRoleUser` | `readwrite` | **Allowed** (Unmasked) | **Allowed** (Masked) | **Allowed** (Insert, Update, Delete) |
+| **2. FullView** | `spanner-fgac-fullview@...` | `roles/spanner.databaseRoleUser` | `fullview` | **Allowed** (Unmasked) | **Allowed** (Masked) | ❌ **Denied** (Read-Only) |
+| **3. Masked** | `spanner-fgac-masked@...` | `roles/spanner.databaseRoleUser` | `masked` | ❌ **Denied** (403 Error) | **Allowed** (Masked SSN/Phone) | ❌ **Denied** (No DML) |
 
 ---
 
 ## Quickstart
 
 ### Prerequisites
-- [Google Cloud SDK (`gcloud`)](https://cloud.google.com/sdk) authenticated: `gcloud auth application-default login`
+- [Google Cloud SDK (`gcloud`)](https://cloud.google.com/sdk) authenticated:
+  ```bash
+  gcloud auth application-default login
+  ```
 - [Terraform](https://developer.hashicorp.com/terraform) (>= 1.5.0)
 - [`uv`](https://github.com/astral-sh/uv) (Fast Python package manager)
 
 ---
 
-### Step 1: Configure Terraform
+### Step 1: Configure & Apply Terraform
 
 1. Navigate to the `terraform/` directory:
    ```bash
@@ -70,12 +75,11 @@ graph TD
    ```hcl
    project_id    = "your-gcp-project-id"
    region        = "us-central1"
-
-   # Default is "shared-demos" (assumes it already exists).
-   # If left empty ("") or null, Terraform will create a new Spanner instance with 100 PU, standard edition, and no backups.
    instance_name = "shared-demos"
-
    database_id   = "fgac-demo"
+   
+   # Optional: specify an explicit impersonator member (defaults to your active gcloud user)
+   # impersonator_member = "user:you@example.com"
    ```
 
 4. Apply the Terraform configuration:
@@ -85,14 +89,12 @@ graph TD
    cd ..
    ```
 
-This creates:
+This configures:
 - The Spanner database `fgac-demo`
 - The `customers` table and `customers_masked` view (`SQL SECURITY DEFINER`)
 - Database roles: `readwrite`, `fullview`, `masked`
-- 3 FGAC Service Accounts and local JSON keys in `credentials/`:
-  - `credentials/readwrite_credentials.json`
-  - `credentials/fullview_credentials.json`
-  - `credentials/masked_credentials.json`
+- 3 FGAC Service Accounts (`spanner-fgac-readwrite`, `spanner-fgac-fullview`, `spanner-fgac-masked`)
+- `roles/iam.serviceAccountTokenCreator` granted on each service account to your user so they can be impersonated without static key files.
 
 ---
 
@@ -104,7 +106,7 @@ This creates:
    ```
    *Generates `data/customers.csv` and `data/customers_masked.csv`.*
 
-2. Seed the records into Spanner using the `readwrite` database role:
+2. Seed the records into Spanner using impersonated credentials:
    ```bash
    uv run scripts/seed_database.py
    ```
@@ -113,7 +115,7 @@ This creates:
 
 ### Step 3: Run Automated Verification Matrix
 
-Run the automated test suite to verify the 3 FGAC personas against table queries, view queries, and DML:
+Run the automated test suite to verify the 3 FGAC personas via Service Account Impersonation:
 ```bash
 uv run scripts/verify_access.py
 ```
@@ -145,6 +147,7 @@ Launch the web application to demonstrate persona switching, live queries, and s
 ```bash
 uv run app/app.py
 ```
-- **Tab 1 ("Security & Access Demo")**: Interactive persona switcher (`readwrite`, `fullview`, `masked`), live query executions against the table vs. masked view, DML insert tests, and real-time security error audits.
+Open [http://localhost:8080](http://localhost:8080) in your browser. The dashboard includes:
+- **Tab 1 ("Security & Access Demo")**: Interactive persona switcher (`readwrite`, `fullview`, `masked`) connecting via impersonated credentials, live query executions against the table vs. masked view, DML insert tests, and real-time security error audits.
 - **Tab 2 ("Database DDL & Schema")**: Visual breakdown of the `customers` table, the `SQL SECURITY DEFINER` masked view, role privileges, and a live Spanner DDL viewer with a refresh button.
-- **Tab 3 ("Python Connection & Role Usage")**: Explains the two-tier security model (IAM authentication vs FGAC authorization), demonstrates why passing `database_role` to the Python SDK is necessary, and provides a live 3-button test playground comparing valid, omitted, and unauthorized role requests in real time.
+- **Tab 3 ("Python Connection & Role Usage")**: Explains the two-tier security model (IAM authentication vs FGAC authorization), demonstrates the `impersonated_credentials.Credentials` pattern without local keys, and provides a live 3-button test playground comparing valid, omitted, and unauthorized role requests in real time.

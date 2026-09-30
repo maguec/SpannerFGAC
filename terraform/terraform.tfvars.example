@@ -15,5 +15,6 @@ create_instance = false
 # Database ID to create within the instance
 database_id = "fgac-demo"
 
-# Local directory where the 4 service account credential JSON files will be written
-credentials_dir = "../credentials"
+# Optional: IAM member identity allowed to impersonate the service accounts.
+# Defaults to the currently authenticated gcloud user if left empty ("").
+# impersonator_member = "user:you@example.com"

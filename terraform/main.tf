@@ -109,16 +109,27 @@ resource "google_service_account" "personas" {
   display_name = "Spanner FGAC ${each.value.display_name}"
 }
 
-resource "google_service_account_key" "keys" {
-  for_each           = google_service_account.personas
-  service_account_id = each.value.name
+# ---------------------------------------------------------------------------------------------------------------------
+# Service Account Impersonation (No local key downloads)
+# Grants caller permission to generate short-lived tokens via google.auth.impersonated_credentials
+# ---------------------------------------------------------------------------------------------------------------------
+data "google_client_openid_userinfo" "me" {}
+
+locals {
+  impersonator_member = var.impersonator_member != "" ? (
+    startswith(var.impersonator_member, "user:") ||
+    startswith(var.impersonator_member, "serviceAccount:") ||
+    startswith(var.impersonator_member, "group:")
+    ? var.impersonator_member
+    : "user:${var.impersonator_member}"
+  ) : "user:${data.google_client_openid_userinfo.me.email}"
 }
 
-resource "local_file" "credentials" {
-  for_each        = google_service_account_key.keys
-  content         = base64decode(each.value.private_key)
-  filename        = "${path.module}/${var.credentials_dir}/${each.key}_credentials.json"
-  file_permission = "0600"
+resource "google_service_account_iam_member" "token_creator" {
+  for_each           = google_service_account.personas
+  service_account_id = each.value.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = local.impersonator_member
 }
 
 # ---------------------------------------------------------------------------------------------------------------------

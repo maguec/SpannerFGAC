@@ -77,22 +77,32 @@ def get_default_config():
 
 def test_persona(project: str, instance_id: str, database_id: str, creds_dir: str, persona_key: str):
     cfg = PERSONA_CONFIG[persona_key]
-    key_path = os.path.join(creds_dir, cfg["key_file"])
-
-    if not os.path.exists(key_path):
-        return {
-            "title": cfg["title"],
-            "error": f"Missing key: {cfg['key_file']}",
-            "results": {},
-        }
+    target_sa = f"spanner-fgac-{persona_key}@{project}.iam.gserviceaccount.com"
+    key_path = os.path.join(creds_dir, cfg["key_file"]) if creds_dir else None
 
     os.environ["SPANNER_DISABLE_BUILTIN_METRICS"] = "true"
-    creds = service_account.Credentials.from_service_account_file(key_path)
-    client = spanner.Client(
-        project=project or creds.project_id,
-        credentials=creds,
-        disable_builtin_metrics=True,
-    )
+
+    if key_path and os.path.exists(key_path):
+        creds = service_account.Credentials.from_service_account_file(key_path)
+        client = spanner.Client(
+            project=project or creds.project_id,
+            credentials=creds,
+            disable_builtin_metrics=True,
+        )
+    else:
+        # Default to Service Account Impersonation
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from scripts.auth import get_impersonated_client
+        try:
+            client = get_impersonated_client(target_sa_email=target_sa, project_id=project)
+        except Exception as e:
+            return {
+                "title": cfg["title"],
+                "error": f"Impersonation failed: {e}",
+                "results": {},
+            }
+
     instance = client.instance(instance_id)
 
     db_role = cfg["database_role"]

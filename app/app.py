@@ -37,28 +37,31 @@ def get_config():
 DEFAULT_PROJECT, DEFAULT_INSTANCE, DEFAULT_DATABASE = get_config()
 
 PERSONAS = {
-    "ReadWrite (FGAC Role)": {
+    "ReadWrite (IAM Role)": {
         "key_file": "readwrite_credentials.json",
         "database_role": "readwrite",
-        "description": "FGAC role with SELECT, INSERT, UPDATE, DELETE privileges on table & view.",
+        "iam_role": "roles/spanner.databaseRoleUser",
+        "description": "IAM Service Account authorized to assume the 'readwrite' database role (SELECT, INSERT, UPDATE, DELETE).",
         "expected_table": "Allowed (Unmasked PII)",
         "expected_view": "Allowed (Masked PII)",
         "expected_dml": "Allowed",
         "color": "blue",
     },
-    "FullView (FGAC Role)": {
+    "FullView (IAM Role)": {
         "key_file": "fullview_credentials.json",
         "database_role": "fullview",
-        "description": "FGAC role with read-only SELECT privilege. Writes are blocked.",
+        "iam_role": "roles/spanner.databaseRoleUser",
+        "description": "IAM Service Account authorized to assume the 'fullview' database role (read-only unmasked SELECT).",
         "expected_table": "Allowed (Unmasked PII)",
         "expected_view": "Allowed (Masked PII)",
         "expected_dml": "Denied (403)",
         "color": "purple",
     },
-    "Masked (FGAC Role)": {
+    "Masked (IAM Role)": {
         "key_file": "masked_credentials.json",
         "database_role": "masked",
-        "description": "FGAC role with SELECT ONLY on customers_masked view. Direct table access is blocked.",
+        "iam_role": "roles/spanner.databaseRoleUser",
+        "description": "IAM Service Account authorized to assume the 'masked' database role (SELECT on masked view only).",
         "expected_table": "Denied (403 Permission Denied)",
         "expected_view": "Allowed (Masked PII Only)",
         "expected_dml": "Denied (403)",
@@ -120,22 +123,32 @@ def fetch_live_ddl():
 
 def get_spanner_db(persona_name: str):
     info = PERSONAS[persona_name]
+    role = info["database_role"]
+    target_sa = f"spanner-fgac-{role}@{DEFAULT_PROJECT}.iam.gserviceaccount.com"
     key_path = os.path.join(CREDS_DIR, info["key_file"])
-    if not os.path.exists(key_path):
-        raise FileNotFoundError(f"Credential file '{info['key_file']}' not found in credentials/ directory. Please run terraform apply.")
 
     os.environ["SPANNER_DISABLE_BUILTIN_METRICS"] = "true"
-    creds = service_account.Credentials.from_service_account_file(key_path)
-    client = spanner.Client(
-        project=DEFAULT_PROJECT or creds.project_id,
-        credentials=creds,
-        disable_builtin_metrics=True,
-    )
+
+    if os.path.exists(key_path):
+        creds = service_account.Credentials.from_service_account_file(key_path)
+        client = spanner.Client(
+            project=DEFAULT_PROJECT or creds.project_id,
+            credentials=creds,
+            disable_builtin_metrics=True,
+        )
+        sa_email = creds.service_account_email
+    else:
+        # Default to Service Account Impersonation
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from scripts.auth import get_impersonated_client
+        client = get_impersonated_client(target_sa_email=target_sa, project_id=DEFAULT_PROJECT)
+        sa_email = f"{target_sa} (impersonated)"
+
     instance = client.instance(DEFAULT_INSTANCE)
-    role = info["database_role"]
     if role:
-        return instance.database(DEFAULT_DATABASE, database_role=role), creds.service_account_email
-    return instance.database(DEFAULT_DATABASE), creds.service_account_email
+        return instance.database(DEFAULT_DATABASE, database_role=role), sa_email
+    return instance.database(DEFAULT_DATABASE), sa_email
 
 @ui.page("/")
 def index():
@@ -178,15 +191,21 @@ def index():
 
                     desc_label = ui.label("").classes("text-sm text-slate-600 mt-2")
                     
-                    with ui.row().classes("gap-4 mt-3"):
+                    with ui.row().classes("gap-3 mt-3 flex-wrap items-center"):
+                        badge_iam = ui.badge("IAM: roles/spanner.databaseRoleUser", color="indigo").classes("text-xs")
+                        badge_dbrole = ui.badge("DB Role: -", color="teal").classes("text-xs font-mono")
                         badge_table = ui.badge("Table Access", color="grey").classes("text-xs")
                         badge_view = ui.badge("View Access", color="grey").classes("text-xs")
                         badge_dml = ui.badge("DML Access", color="grey").classes("text-xs")
-                        active_sa = ui.label("").classes("text-xs text-slate-400 self-center")
+                        active_sa = ui.label("").classes("text-xs text-slate-400 self-center ml-2")
 
                     def update_persona_info():
                         p = PERSONAS[selected_persona.value]
+                        role = p["database_role"]
+                        target_sa = f"spanner-fgac-{role}@{DEFAULT_PROJECT}.iam.gserviceaccount.com"
                         desc_label.text = p["description"]
+                        badge_iam.text = f"IAM: {p['iam_role']}"
+                        badge_dbrole.text = f"Assumed DB Role: {p['database_role']}"
                         badge_table.text = f"Table: {p['expected_table']}"
                         badge_table.props(f"color={p['color']}")
                         badge_view.text = f"View: {p['expected_view']}"
@@ -197,7 +216,7 @@ def index():
                                 email = json.load(kf).get("client_email", "")
                                 active_sa.text = f"Key: {p['key_file']} ({email})"
                         else:
-                            active_sa.text = f"Key file {p['key_file']} not found."
+                            active_sa.text = f"Target Principal: {target_sa} (via Impersonation)"
 
                     selected_persona.on_value_change(update_persona_info)
                     update_persona_info()
@@ -382,19 +401,30 @@ This Spanner database implements **Fine-Grained Access Control (FGAC)** using a 
                 with ui.card().classes("w-full shadow-md bg-white border border-slate-200"):
                     with ui.row().classes("items-center gap-2"):
                         ui.badge("Python SDK", color="blue").classes("text-xs font-bold")
-                        ui.label("Python Connection Pattern").classes("font-semibold text-slate-800")
+                        ui.label("Python Connection Pattern (via Service Account Impersonation)").classes("font-semibold text-slate-800")
 
-                    ui.code("""from google.cloud import spanner
-from google.oauth2 import service_account
+                    ui.code("""import google.auth
+from google.auth import impersonated_credentials
+from google.cloud import spanner
 
-# 1. Authenticate with Service Account credentials
-creds = service_account.Credentials.from_service_account_file("credentials/masked_credentials.json")
-client = spanner.Client(project="mague-tf", credentials=creds, disable_builtin_metrics=True)
+# 1. Base caller credentials (e.g., from gcloud auth application-default login)
+source_credentials, _ = google.auth.default()
 
-# 2. Pass database_role to set gRPC session security context (REQUIRED for FGAC)
+# 2. Impersonate the target FGAC service account (No local keys needed!)
+impersonated_creds = impersonated_credentials.Credentials(
+    source_credentials=source_credentials,
+    target_principal="spanner-fgac-masked@mague-tf.iam.gserviceaccount.com",
+    target_scopes=["https://www.googleapis.com/auth/spanner.data"],
+    lifetime=3600,
+)
+
+# 3. Create client with impersonated credentials
+client = spanner.Client(project="mague-tf", credentials=impersonated_creds, disable_builtin_metrics=True)
+
+# 4. Pass database_role to set gRPC session security context (REQUIRED for FGAC)
 database = client.instance("shared-demos").database("fgac-demo", database_role="masked")
 
-# 3. Queries execute under the 'masked' role's privileges
+# 5. Queries execute under the 'masked' role's privileges
 with database.snapshot() as snapshot:
     rows = list(snapshot.execute_sql("SELECT * FROM customers_masked LIMIT 5"))""", language="python").classes("w-full text-xs")
 
@@ -403,7 +433,7 @@ with database.snapshot() as snapshot:
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("play_circle", size="1.3rem").classes("text-teal-600")
                         ui.label("Live Interactive Test: Compare Connection Behaviors").classes("font-semibold text-slate-800")
-                    ui.label("Test the exact behavior of Spanner using the 'masked' service account under three different connection configurations:").classes("text-xs text-slate-500 mb-2")
+                    ui.label("Test Spanner behavior under three connection configurations using impersonated credentials:").classes("text-xs text-slate-500 mb-2")
 
                     with ui.row().classes("gap-3 flex-wrap"):
                         btn_test_valid = ui.button("1. Connect WITH database_role='masked' (Valid)", icon="check_circle").props("unelevated color=positive")
@@ -416,14 +446,18 @@ with database.snapshot() as snapshot:
 
                     def run_connection_test(scenario: str):
                         test_output_label.text = "Executing test against Cloud Spanner API..."
-                        key_path = os.path.join(CREDS_DIR, "masked_credentials.json")
-                        if not os.path.exists(key_path):
-                            test_output_label.text = "Error: credentials/masked_credentials.json not found."
-                            return
+                        target_sa = f"spanner-fgac-masked@{DEFAULT_PROJECT}.iam.gserviceaccount.com"
 
                         try:
-                            creds = service_account.Credentials.from_service_account_file(key_path)
-                            c = spanner.Client(project=DEFAULT_PROJECT or creds.project_id, credentials=creds, disable_builtin_metrics=True)
+                            # Use Impersonated Credentials
+                            source_creds, _ = google.auth.default()
+                            impersonated_creds = impersonated_credentials.Credentials(
+                                source_credentials=source_creds,
+                                target_principal=target_sa,
+                                target_scopes=["https://www.googleapis.com/auth/spanner.data"],
+                                lifetime=3600,
+                            )
+                            c = spanner.Client(project=DEFAULT_PROJECT, credentials=impersonated_creds, disable_builtin_metrics=True)
                             inst = c.instance(DEFAULT_INSTANCE)
 
                             if scenario == "valid":
